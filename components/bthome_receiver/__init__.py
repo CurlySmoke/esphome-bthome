@@ -20,7 +20,7 @@ from esphome.const import (
     PLATFORM_ESP32,
 )
 from esphome import automation
-from esphome.core import CORE
+from esphome.core import CORE, EsphomeError
 from esphome.components.esp32 import add_idf_sdkconfig_option
 
 CODEOWNERS = ["@esphome/core"]
@@ -309,9 +309,28 @@ async def to_code(config):
         # Register with the global BLE tracker (requires esp32_ble_tracker: in config)
         # Get the tracker ID from config or use the default
         tracker_id = config.get(esp32_ble_tracker.CONF_ESP32_BLE_ID)
+        if tracker_id is None:
+            # esp32_ble_id is optional in the schema; fall back to the config's esp32_ble_tracker
+            # (as core BLE components do). Without this the receiver was never registered and
+            # silently heard nothing.
+            tracker_conf = CORE.config.get("esp32_ble_tracker")
+            if isinstance(tracker_conf, list):
+                tracker_conf = tracker_conf[0] if tracker_conf else None
+            if tracker_conf:
+                tracker_id = tracker_conf[CONF_ID]
+                config[esp32_ble_tracker.CONF_ESP32_BLE_ID] = tracker_id
+        if tracker_id is None:
+            raise EsphomeError(
+                "bthome_receiver (Bluedroid) needs an esp32_ble_tracker: block in the config"
+            )
         if tracker_id is not None:
-            parent = await cg.get_variable(tracker_id)
-            cg.add(parent.register_listener(var))
+            # Use the tracker's helper so this listener is counted in
+            # ESPHOME_ESP32_BLE_TRACKER_LISTENER_COUNT: since ESPHome 2026.x the tracker keeps
+            # listeners in a StaticVector sized from that count, and a manual
+            # register_listener() isn't counted, so with no other BLE listener the vector has
+            # room for zero and the receiver silently never sees an advertisement.
+            # (Same as upstream PR dz0ny/esphome-bthome#16.)
+            await esp32_ble_tracker.register_ble_device(var, config)
 
     for device_conf in config.get(CONF_DEVICES, []):
         device_var = cg.new_Pvariable(device_conf[CONF_ID], var)
