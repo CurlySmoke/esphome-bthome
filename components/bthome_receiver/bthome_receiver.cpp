@@ -685,8 +685,8 @@ bool BTHomeDevice::parse_advertisement(const std::vector<uint8_t> &service_data)
 
   ESP_LOGV(TAG, "Device info: 0x%02X, encrypted: %s", device_info, is_encrypted ? "yes" : "no");
 
-  const uint8_t *payload_data;
-  size_t payload_len;
+  const uint8_t *payload_data = nullptr;
+  size_t payload_len = 0;
   uint8_t decrypted_buffer[256];
 
   if (is_encrypted) {
@@ -720,15 +720,17 @@ bool BTHomeDevice::parse_advertisement(const std::vector<uint8_t> &service_data)
 
     // BTHome v2 layout: device_info(1) | ciphertext | counter(4) | MIC(4).
     // decrypt_payload_() takes the ciphertext with the MIC appended, so join them.
-    size_t payload_len = service_data.size() - 1 - 8;
+    // (enc_len, not payload_len: a local payload_len here shadowed the outer one, which then
+    // reached parse_measurements_() uninitialized and crashed the device on every packet.)
+    size_t enc_len = service_data.size() - 1 - 8;
     uint8_t ciphertext[256];
-    if (payload_len + 4 > sizeof(ciphertext)) {
+    if (enc_len + 4 > sizeof(ciphertext)) {
       ESP_LOGW(TAG, "Encrypted payload too long");
       return false;
     }
-    memcpy(ciphertext, service_data.data() + 1, payload_len);
-    memcpy(ciphertext + payload_len, service_data.data() + service_data.size() - 4, 4);
-    size_t ciphertext_len = payload_len + 4;
+    memcpy(ciphertext, service_data.data() + 1, enc_len);
+    memcpy(ciphertext + enc_len, service_data.data() + service_data.size() - 4, 4);
+    size_t ciphertext_len = enc_len + 4;
 
     // MAC for the nonce, as displayed (MSB first), e.g. B0:3F:... -> B0 3F ...
     uint8_t mac[6];
