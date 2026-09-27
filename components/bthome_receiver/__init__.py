@@ -260,6 +260,14 @@ async def to_code(config):
     if ble_stack == BLE_STACK_NIMBLE:
         # NimBLE stack configuration
         cg.add_define("USE_BTHOME_RECEIVER_NIMBLE")
+        # ESPHome 2026.9+ excludes the IDF "bt" component unless requested (the Bluedroid
+        # path gets it via esp32_ble_tracker; NimBLE doesn't go through it).
+        try:
+            from esphome.components.esp32 import include_builtin_idf_component
+
+            include_builtin_idf_component("bt")
+        except ImportError:
+            pass
 
         # Enable NimBLE in ESP-IDF
         add_idf_sdkconfig_option("CONFIG_BT_ENABLED", True)

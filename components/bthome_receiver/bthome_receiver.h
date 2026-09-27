@@ -221,6 +221,7 @@ class BTHomeDevice : public Parented<BTHomeReceiverHub> {
   bool encryption_enabled_{false};
   std::array<uint8_t, AES_KEY_SIZE> encryption_key_{};
   uint32_t last_counter_{0};
+  bool have_counter_{false};  // first packet may carry counter 0
 
   // Deduplication - store last received service data to skip duplicate packets
   std::vector<uint8_t> last_service_data_;

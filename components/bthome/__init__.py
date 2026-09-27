@@ -324,6 +324,14 @@ async def to_code(config):
         if ble_stack == BLE_STACK_NIMBLE:
             # NimBLE stack - lighter weight (~170KB flash, ~100KB RAM savings)
             cg.add_define("USE_BTHOME_NIMBLE")
+            # ESPHome 2026.9+ excludes the IDF "bt" component unless something requests it;
+            # the NimBLE path doesn't go through esp32_ble, so request it here.
+            try:
+                from esphome.components.esp32 import include_builtin_idf_component
+
+                include_builtin_idf_component("bt")
+            except ImportError:  # older ESPHome: bt is never excluded
+                pass
             add_idf_sdkconfig_option("CONFIG_BT_ENABLED", True)
             add_idf_sdkconfig_option("CONFIG_BT_NIMBLE_ENABLED", True)
             add_idf_sdkconfig_option("CONFIG_BT_CONTROLLER_ENABLED", True)
@@ -336,6 +344,11 @@ async def to_code(config):
             add_idf_sdkconfig_option("CONFIG_BT_NIMBLE_ROLE_BROADCASTER", True)
             # Use tinycrypt for smaller footprint (saves ~7KB)
             add_idf_sdkconfig_option("CONFIG_BT_NIMBLE_CRYPTO_STACK_MBEDTLS", False)
+            # A pure broadcaster needs neither; host-based privacy otherwise pulls in Security
+            # Manager code that isn't compiled for broadcaster-only builds (link error on
+            # classic ESP32: undefined reference to ble_sm_alg_encrypt). Same as upstream PR #19.
+            add_idf_sdkconfig_option("CONFIG_BT_NIMBLE_SECURITY_ENABLE", False)
+            add_idf_sdkconfig_option("CONFIG_BT_NIMBLE_HOST_BASED_PRIVACY", False)
         else:
             # Bluedroid stack (default)
             cg.add_define("USE_BTHOME_BLUEDROID")

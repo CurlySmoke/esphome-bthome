@@ -709,20 +709,31 @@ bool BTHomeDevice::parse_advertisement(const std::vector<uint8_t> &service_data)
 
     ESP_LOGV(TAG, "Counter: %u, last counter: %u", counter, this->last_counter_);
 
-    // Validate counter (replay protection)
-    if (counter <= this->last_counter_) {
+    // Validate counter (replay protection). A sender's counter restarts near 0 after it loses
+    // power (it only survives deep sleep), so a small counter below the last one is treated as
+    // a restart rather than a replay; anything else that doesn't increase is rejected.
+    bool sender_restarted = this->have_counter_ && counter < this->last_counter_ && counter < 16;
+    if (this->have_counter_ && counter <= this->last_counter_ && !sender_restarted) {
       ESP_LOGW(TAG, "Counter not increased (replay attack?): %u <= %u", counter, this->last_counter_);
       return false;
     }
 
-    // Ciphertext is between device_info and counter
-    const uint8_t *ciphertext = service_data.data() + 1;
-    size_t ciphertext_len = service_data.size() - 1 - 4;  // Exclude device_info and counter+MIC
+    // BTHome v2 layout: device_info(1) | ciphertext | counter(4) | MIC(4).
+    // decrypt_payload_() takes the ciphertext with the MIC appended, so join them.
+    size_t payload_len = service_data.size() - 1 - 8;
+    uint8_t ciphertext[256];
+    if (payload_len + 4 > sizeof(ciphertext)) {
+      ESP_LOGW(TAG, "Encrypted payload too long");
+      return false;
+    }
+    memcpy(ciphertext, service_data.data() + 1, payload_len);
+    memcpy(ciphertext + payload_len, service_data.data() + service_data.size() - 4, 4);
+    size_t ciphertext_len = payload_len + 4;
 
-    // Get MAC address (6 bytes)
+    // MAC for the nonce, as displayed (MSB first), e.g. B0:3F:... -> B0 3F ...
     uint8_t mac[6];
     for (int i = 0; i < 6; i++) {
-      mac[i] = (this->address_ >> (i * 8)) & 0xFF;
+      mac[i] = (this->address_ >> ((5 - i) * 8)) & 0xFF;
     }
 
     size_t plaintext_len;
@@ -733,7 +744,10 @@ bool BTHomeDevice::parse_advertisement(const std::vector<uint8_t> &service_data)
     }
 
     // Update last counter after successful decryption
+    if (sender_restarted)
+      ESP_LOGI(TAG, "Counter restarted (%u -> %u), sender probably lost power", this->last_counter_, counter);
     this->last_counter_ = counter;
+    this->have_counter_ = true;
 
     payload_data = decrypted_buffer;
     payload_len = plaintext_len;

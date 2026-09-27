@@ -4,8 +4,17 @@
 
 #if defined(USE_ESP32) || defined(USE_NRF52)
 
+#include <algorithm>
 #include <cstring>
 #include <cmath>
+
+#ifdef USE_ESP32
+#include <esp_attr.h>
+// Encryption counter copy in RTC slow memory: survives deep sleep (not power loss), so the
+// counter keeps increasing across wakes instead of restarting at 0 on every boot - receivers
+// reject a counter that doesn't increase.
+static RTC_DATA_ATTR uint32_t bthome_rtc_counter = 0;
+#endif
 
 // Platform-specific includes
 #ifdef USE_ESP32
@@ -95,6 +104,9 @@ float BTHome::get_setup_priority() const {
 
 void BTHome::setup() {
   ESP_LOGD(TAG, "Setting up BTHome...");
+#ifdef USE_ESP32
+  this->counter_ = bthome_rtc_counter;
+#endif
 
 #ifdef USE_ESP32
   #ifdef USE_BTHOME_NIMBLE
@@ -306,12 +318,17 @@ void BTHome::set_device_name(const std::string &name) {
 void BTHome::add_measurement(sensor::Sensor *sensor, uint8_t object_id, uint8_t data_bytes,
                               bool is_signed, float factor, bool advertise_immediately) {
   this->measurements_.push_back({sensor, object_id, data_bytes, is_signed, factor, advertise_immediately});
+  // Keep ascending object-id order (stable, so repeated ids keep their configured order)
+  std::stable_sort(this->measurements_.begin(), this->measurements_.end(),
+                   [](const auto &a, const auto &b) { return a.object_id < b.object_id; });
 }
 #endif
 
 #ifdef USE_BINARY_SENSOR
 void BTHome::add_binary_measurement(binary_sensor::BinarySensor *sensor, uint8_t object_id, bool advertise_immediately) {
   this->binary_measurements_.push_back({sensor, object_id, advertise_immediately});
+  std::stable_sort(this->binary_measurements_.begin(), this->binary_measurements_.end(),
+                   [](const auto &a, const auto &b) { return a.object_id < b.object_id; });
 }
 #endif
 
@@ -385,9 +402,13 @@ void BTHome::build_advertisement_data_() {
       size_t count = this->measurements_.size();
       size_t added = 0;
 
-      // Rotate through measurements starting from current index
-      for (size_t i = 0; i < count; i++) {
-        size_t idx = (start_idx + i) % count;
+      // Measurements are kept sorted by object id (add_measurement) and a packet never wraps
+      // back to index 0 mid-packet, so object ids always go out in ascending order, which
+      // BTHome v2 receivers (Home Assistant included) require. Encryption adds 8 bytes
+      // (counter + MIC), so reserve them when checking the fit.
+      size_t reserve = this->encryption_enabled_ ? 8 : 0;
+      size_t idx = start_idx;
+      for (; idx < count; idx++) {
         const auto &measurement = this->measurements_[idx];
 
         if (!measurement.sensor->has_state() || std::isnan(measurement.sensor->state))
@@ -395,17 +416,15 @@ void BTHome::build_advertisement_data_() {
 
         // Check if measurement fits: object_id (1 byte) + data_bytes
         size_t encoded_size = 1 + measurement.data_bytes;
-        if (pos + encoded_size > MAX_BLE_ADVERTISEMENT_SIZE)
+        if (pos + encoded_size + reserve > MAX_BLE_ADVERTISEMENT_SIZE)
           break;
 
         pos += this->encode_measurement_(this->adv_data_ + pos, MAX_BLE_ADVERTISEMENT_SIZE - pos, measurement);
         added++;
       }
 
-      // Advance index for next advertisement (rotate through all sensors)
-      if (added > 0 && added < count) {
-        this->current_sensor_index_ = (start_idx + added) % count;
-      }
+      // Next advertisement continues where this one stopped (wrapping to 0 after the end)
+      this->current_sensor_index_ = (added > 0 && idx < count) ? idx : 0;
     }
 #endif
 
@@ -415,15 +434,16 @@ void BTHome::build_advertisement_data_() {
       size_t count = this->binary_measurements_.size();
       size_t added = 0;
 
-      // Rotate through binary measurements starting from current index
-      for (size_t i = 0; i < count; i++) {
-        size_t idx = (start_idx + i) % count;
+      // Same scheme as the sensors above: sorted, no mid-packet wrap, room for counter + MIC
+      size_t reserve = this->encryption_enabled_ ? 8 : 0;
+      size_t idx = start_idx;
+      for (; idx < count; idx++) {
         const auto &measurement = this->binary_measurements_[idx];
 
         if (!measurement.sensor->has_state())
           continue;
 
-        if (pos + 2 > MAX_BLE_ADVERTISEMENT_SIZE)
+        if (pos + 2 + reserve > MAX_BLE_ADVERTISEMENT_SIZE)
           break;
 
         pos += this->encode_binary_measurement_(this->adv_data_ + pos, MAX_BLE_ADVERTISEMENT_SIZE - pos,
@@ -431,10 +451,7 @@ void BTHome::build_advertisement_data_() {
         added++;
       }
 
-      // Advance index for next advertisement
-      if (added > 0 && added < count) {
-        this->current_binary_index_ = (start_idx + added) % count;
-      }
+      this->current_binary_index_ = (added > 0 && idx < count) ? idx : 0;
     }
 #endif
   }
@@ -450,16 +467,24 @@ void BTHome::build_advertisement_data_() {
     size_t ciphertext_len = 0;
 
     if (this->encrypt_payload_(plaintext, measurement_len, ciphertext, &ciphertext_len)) {
-      memcpy(this->adv_data_ + measurement_start, ciphertext, ciphertext_len);
-      pos = measurement_start + ciphertext_len;
+      // BTHome v2 layout: ciphertext | counter (4, little-endian) | MIC (4).
+      // encrypt_payload_() returns ciphertext followed by the MIC, so split them.
+      size_t payload_len = ciphertext_len - 4;
+      memcpy(this->adv_data_ + measurement_start, ciphertext, payload_len);
+      pos = measurement_start + payload_len;
 
-      // Add counter (4 bytes, little-endian)
       this->adv_data_[pos++] = this->counter_ & 0xFF;
       this->adv_data_[pos++] = (this->counter_ >> 8) & 0xFF;
       this->adv_data_[pos++] = (this->counter_ >> 16) & 0xFF;
       this->adv_data_[pos++] = (this->counter_ >> 24) & 0xFF;
 
+      memcpy(this->adv_data_ + pos, ciphertext + payload_len, 4);
+      pos += 4;
+
       this->counter_++;
+#ifdef USE_ESP32
+      bthome_rtc_counter = this->counter_;
+#endif
     }
   }
 
@@ -891,7 +916,9 @@ bool BTHome::encrypt_payload_(const uint8_t *plaintext, size_t plaintext_len, ui
     ESP_LOGE(TAG, "Failed to get NimBLE MAC address: %d", rc);
     return false;
   }
-  memcpy(nonce, mac, 6);
+  // NimBLE returns the address LSB first; the BTHome nonce wants it as displayed (MSB first)
+  for (int i = 0; i < 6; i++)
+    nonce[i] = mac[5 - i];
   #else
   // Bluedroid: Get MAC address
   const uint8_t *mac = esp_bt_dev_get_address();
