@@ -587,6 +587,13 @@ void BTHome::start_advertising_() {
   adv_params.itvl_min = static_cast<uint16_t>(this->min_interval_ / 0.625f);
   adv_params.itvl_max = static_cast<uint16_t>(this->max_interval_ / 0.625f);
 
+  // Apply tx_power. The NimBLE path never did, so the controller stayed at its default (+3 dBm)
+  // whatever the YAML said. esp_ble_tx_power_set is a controller API and works under NimBLE too.
+  esp_err_t perr = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, this->tx_power_esp32_);
+  if (perr != ESP_OK) {
+    ESP_LOGW(TAG, "esp_ble_tx_power_set failed: %s", esp_err_to_name(perr));
+  }
+
   ESP_LOGD(TAG, "Starting NimBLE advertising (%zu bytes, scan_rsp %zu bytes)",
            this->adv_data_len_, this->scan_rsp_data_len_);
   rc = ble_gap_adv_start(this->nimble_own_addr_type_, nullptr, BLE_HS_FOREVER,
